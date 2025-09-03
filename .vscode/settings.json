@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "compare": "cpp",
+        "cstdint": "cpp",
+        "math_utils.h": "c",
+        "cmath": "c",
+        "mb_slave.h": "c"
+    }
+}
