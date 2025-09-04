@@ -837,31 +837,12 @@ static void cmd_motor_status(BaseSequentialStream *chp, int argc, char *argv[]) 
   chprintf(chp, "Motor phases duty: %d , %d, %d\r\n", motor_get_motor()->motor_state.phase_duty[0], motor_get_motor()->motor_state.phase_duty[1], motor_get_motor()->motor_state.phase_duty[2]);
 }
 
-static void cmd_serial_status(BaseSequentialStream *chp, int argc, char *argv[]) {
-  (void)argc;
-  (void)argv;
-  
-  // Get SD1 (Modbus) buffer status
-  size_t sd1_rx_bytes = iqGetFullI(&SD1.iqueue);
-  size_t sd1_rx_capacity = qSizeX(&SD1.iqueue);
-  size_t sd1_rx_free = iqGetEmptyI(&SD1.iqueue);
-  bool sd1_rx_empty = iqIsEmptyI(&SD1.iqueue);
-  bool sd1_rx_full = iqIsFullI(&SD1.iqueue);
-  
-  chprintf(chp, "SD1 (Modbus) RX Buffer:\r\n");
-  chprintf(chp, "  Bytes in buffer: %d\r\n", sd1_rx_bytes);
-  chprintf(chp, "  Buffer capacity: %d\r\n", sd1_rx_capacity);
-  chprintf(chp, "  Free space: %d\r\n", sd1_rx_free);
-  chprintf(chp, "  Status: %s%s\r\n", sd1_rx_empty ? "EMPTY " : "", sd1_rx_full ? "FULL" : "OK");
-}
-
 static const ShellCommand shell_commands[] = {
   {"set-position", cmd_set_position},
   {"set-speed", cmd_set_speed},
   {"set-current", cmd_set_current},
   {"set-release", cmd_set_release},
   {"motor-status", cmd_motor_status},
-  {"serial-status", cmd_serial_status},
   {NULL, NULL},
 };
 
@@ -878,43 +859,55 @@ static THD_WORKING_AREA(shell_wa, SHELL_WA_SIZE);
 /*===========================================================================*/
 /* Communication Interface                                                   */
 /*===========================================================================*/
-#define MODBUS_SLAVE_ID 1
-#define MODBUS_SERIAL &SD1
-#define MODBUS_BAUD_RATE 115200
 
+// Modbus Slave Application Configuration
+typedef struct {
+    modbus_t modbus_instance;
+    SerialDriver *serial_driver;
+    uint32_t baud_rate;
+    systime_t t15_timeout;
+    systime_t t35_timeout;
+} modbus_slave_app_t;
+
+#define MODBUS_SLAVE_ID 1
 #define MODBUS_LINE_TX PAL_LINE(GPIOB, GPIOB_ARD_D10)
 #define MODBUS_LINE_RX PAL_LINE(GPIOB, GPIOB_PIN7)
 
+// Inline function to calculate Modbus RTU timeouts
+static inline systime_t modbus_calculate_timeout(float baud_rate, float character_multiple) {
+  float timeout_us = (character_multiple * 11.0f * 1000000.0f) / baud_rate;
+  return TIME_US2I((systime_t)timeout_us);
+}
+
 static THD_WORKING_AREA(mb_slave_app_thread_wa, 2048);
 
-static modbus_t modbus_instances;
+static modbus_slave_app_t modbus_slave_app;
 static mutex_t modbus_app_mutex;
 
-const SerialConfig sd1_config = {
-  .speed = MODBUS_BAUD_RATE,
-  .cr1 = 0,
-  .cr2 = 0,
-  .cr3 = 0,
-};
+// Serial configuration will be set dynamically based on baud_rate
 
-uint8_t modbus_serial_write_callback(uint8_t *buffer, uint16_t length) {
+uint16_t modbus_serial_write_callback(uint8_t *buffer, uint16_t length) {
   uint32_t bytes_written = 0;
-  chprintf((BaseSequentialStream *)&SD2, "Modbus serial write callback with length: %d\r\n", length);
-  bytes_written = chnWrite(MODBUS_SERIAL, buffer, length);
+  bytes_written = chnWriteTimeout(modbus_slave_app.serial_driver, buffer, length, TIME_MS2I(100));
   return bytes_written;
 }
 
-uint16_t modbus_holding_register_read_callback(uint16_t address) {
-  return 0;
-}
-
 void modbus_holding_register_write_callback(uint16_t address, uint16_t value) {
-  return;
+  chprintf((BaseSequentialStream *)&SD2, "Modbus holding register write callback with address: %d, value: %d\r\n", address, value);
 }
 
-uint16_t modbus_input_register_read_callback(uint16_t address) {
-  return 0;
+void modbus_holding_register_read_multiple_callback(uint16_t start_address, uint16_t quantity, uint16_t *values) {
+  chprintf((BaseSequentialStream *)&SD2, "Modbus holding register read multiple callback: start=%d, qty=%d\r\n", start_address, quantity);
 }
+
+void modbus_holding_register_write_multiple_callback(uint16_t start_address, uint16_t quantity, const uint16_t *values) {
+  chprintf((BaseSequentialStream *)&SD2, "Modbus holding register write multiple callback: start=%d, qty=%d\r\n", start_address, quantity);
+}
+
+void modbus_input_register_read_multiple_callback(uint16_t start_address, uint16_t quantity, uint16_t *values) {
+  chprintf((BaseSequentialStream *)&SD2, "Modbus input register read multiple callback: start=%d, qty=%d\r\n", start_address, quantity);
+}
+
 
 static THD_FUNCTION(mb_slave_app_thread, arg) {
   (void)arg;
@@ -922,33 +915,79 @@ static THD_FUNCTION(mb_slave_app_thread, arg) {
   chRegSetThreadName("mb_slave_app_thread");
 
   event_listener_t el;
-  chEvtRegisterMaskWithFlags(MODBUS_SERIAL.event, 
+  chEvtRegisterMaskWithFlags(&modbus_slave_app.serial_driver->event, 
                           &el, EVENT_MASK(0), CHN_INPUT_AVAILABLE);
   
+  // Use pre-calculated timeouts from app struct
+  systime_t t15_timeout = modbus_slave_app.t15_timeout;
+  systime_t t35_timeout = modbus_slave_app.t35_timeout;
+
   for(;;) {
       chEvtWaitOne(EVENT_MASK(0));
-      chThdSleepMicroseconds(1750);
-      
-      uint8_t buffer[MODBUS_BUFFER_SIZE];
-      msg_t res = chnReadTimeout(MODBUS_SERIAL, buffer, MODBUS_BUFFER_SIZE, TIME_IMMEDIATE);
-      if (res != MSG_TIMEOUT) {
-          modbus_process_error_t ret = modbus_process_packet(&modbus_instances, buffer, res);
-          chnReadTimeout(MODBUS_SERIAL, buffer, MODBUS_BUFFER_SIZE, TIME_IMMEDIATE);
-          if (ret != MODBUS_PROCESS_SUCCESS) {
-              chprintf((BaseSequentialStream *)&SD2, "Modbus process error: %d\r\n", ret);
+
+      uint8_t frame_buffer[MODBUS_BUFFER_SIZE];
+      uint16_t frame_length = 0;
+      // Read subsequent bytes with T1.5 timeout
+      while (frame_length < MODBUS_BUFFER_SIZE) {
+          msg_t next_byte = chnGetTimeout(modbus_slave_app.serial_driver, t15_timeout);
+          
+          if (next_byte == MSG_TIMEOUT) {
+              // T1.5 timeout - frame is complete
+              break;
           }
+          frame_buffer[frame_length++] = next_byte;
       }
+
+      modbus_process_error_t ret = modbus_process_packet(&modbus_slave_app.modbus_instance, frame_buffer, frame_length);
+      if (ret != MODBUS_PROCESS_SUCCESS) {
+          chprintf((BaseSequentialStream *)&SD2, "Modbus process error: %d, frame_len: %d\r\n", ret, frame_length);
+      }
+      
+      // Clear the serial buffer for invalid data
+      while(!iqIsEmptyI(&modbus_slave_app.serial_driver->iqueue)) {
+        chnGetTimeout(modbus_slave_app.serial_driver, TIME_IMMEDIATE);
+      }
+      
+      chEvtGetAndClearEvents(EVENT_MASK(0)); // clear event raised flag during processing the data
+      chThdSleepS(t35_timeout);
   }
-  chEvtUnregister(MODBUS_SERIAL.event, &el);
+  chEvtUnregister(&modbus_slave_app.serial_driver->event, &el);
 }
 
-void mb_slave_app_init(uint8_t slave_id) {
-  sdStart(MODBUS_SERIAL, &sd1_config);
-  modbus_init(&modbus_instances, slave_id, 
-                     modbus_serial_write_callback, 
-                     modbus_holding_register_read_callback,  
-                     modbus_holding_register_write_callback, 
-                     modbus_input_register_read_callback);
+void mb_slave_app_init(uint8_t slave_id, SerialDriver *serial_driver, uint32_t baud_rate) {
+  // Configure the app struct
+  modbus_slave_app.serial_driver = serial_driver;
+  modbus_slave_app.baud_rate = baud_rate;
+  
+  // Calculate timeouts for the specified baud rate
+  modbus_slave_app.t15_timeout = modbus_calculate_timeout(baud_rate, 1.5f);
+  modbus_slave_app.t35_timeout = modbus_calculate_timeout(baud_rate, 3.5f);
+  
+  // For baud rates > 19200, use fixed timeouts as per Modbus spec
+  if (baud_rate > 19200) {
+    modbus_slave_app.t15_timeout = TIME_US2I(750);
+    modbus_slave_app.t35_timeout = TIME_US2I(1750);
+  }
+  
+  // Configure serial driver
+  const SerialConfig serial_config = {
+    .speed = baud_rate,
+    .cr1 = 0,
+    .cr2 = 0,
+    .cr3 = 0,
+  };
+  sdStart(serial_driver, &serial_config);
+  
+  // Create callback structure - only what's actually used in Modbus
+  modbus_callbacks_t callbacks = {
+    .write_packet_callback = modbus_serial_write_callback,
+    .holding_register_write_callback = modbus_holding_register_write_callback,  // For function 0x06
+    .holding_register_read_multiple_callback = modbus_holding_register_read_multiple_callback,  // For function 0x03
+    .holding_register_write_multiple_callback = modbus_holding_register_write_multiple_callback,  // For function 0x10
+    .input_register_read_multiple_callback = modbus_input_register_read_multiple_callback  // For function 0x04
+  };
+  
+  modbus_init(&modbus_slave_app.modbus_instance, slave_id, 64, 64, &callbacks);
 
   chThdCreateStatic(mb_slave_app_thread_wa, sizeof(mb_slave_app_thread_wa),
                        NORMALPRIO, mb_slave_app_thread, NULL);
@@ -974,7 +1013,7 @@ int main(void)
   palSetLineMode(LINE_DRV_OC_ADJ, PAL_MODE_OUTPUT_PUSHPULL);
   palSetLineMode(LINE_DRV_M_PWM, PAL_MODE_OUTPUT_PUSHPULL);
 
-  mb_slave_app_init(MODBUS_SLAVE_ID);
+  mb_slave_app_init(MODBUS_SLAVE_ID, &SD1, 921600);
 
   position_tracker_init(&position_tracker);
   current_sensing_init(&current_sensing, 
