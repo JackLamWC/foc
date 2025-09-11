@@ -4,6 +4,7 @@
         "cstdint": "cpp",
         "math_utils.h": "c",
         "cmath": "c",
-        "mb_slave.h": "c"
-    }
+        "mb_slave.h": "c",
+        "stdlib.h": "c"
+    },
 }

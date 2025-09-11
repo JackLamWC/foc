@@ -78,6 +78,7 @@ static bool modbus_validate_frame_length(uint8_t function_code, uint16_t len) {
 // Process Modbus request packets
 modbus_process_error_t modbus_process_packet(modbus_t *modbus, uint8_t *data, uint16_t len) {
     // Parse basic request info to check slave ID
+    
     uint8_t slave_id = data[0];
     uint8_t function_code = data[1];
     

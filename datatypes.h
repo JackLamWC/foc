@@ -6,9 +6,9 @@
 
 typedef enum {
   MOTOR_STATUS_OFF = 0,
-  MOTOR_STATUS_DETECTING = 1,
-  MOTOR_STATUS_RUNNING = 1,
-  MOTOR_STATUS_FULL_BRAKE = 2,
+  MOTOR_STATUS_DETECTING,
+  MOTOR_STATUS_RUNNING,
+  MOTOR_STATUS_FULL_BRAKE,
 } motor_status_t;
 
 typedef enum {
@@ -52,7 +52,8 @@ typedef struct {
     float current_mag;
     float duty;
     uint16_t phase_duty[3];
-    
+    float alpha;
+    float beta;
 } motor_state_t;
 
 typedef struct {
@@ -76,5 +77,15 @@ typedef struct {
   current_sensing_config_t current_sensing_config;
   motor_state_t motor_state;
 } motor_t;
+
+typedef enum {
+  MODBUS_INPUT_REGISTER_D_CURRENT = 0,
+  MODBUS_INPUT_REGISTER_Q_CURRENT,
+  MODBUS_INPUT_REGISTER_D_VOLTAGE,
+  MODBUS_INPUT_REGISTER_Q_VOLTAGE,
+  MODBUS_INPUT_REGISTER_RAW_ANGLE,
+  MODBUS_INPUT_REGISTER_Q_REF,
+  MODBUS_INPUT_REGISTER_VOLTAGE_ANGLE,
+} modbus_input_register_t;
 
 #endif

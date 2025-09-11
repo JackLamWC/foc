@@ -423,8 +423,8 @@ typedef struct hal_serial_config {
   /* Driver state.*/                                                        \
   sdstate_t                 state;                                          \
   /* Input queue.*/                                                         \
-  input_queue_t             iqueue;                                         \
   /* Output queue.*/                                                        \
+  input_queue_t             iqueue;                                         \
   output_queue_t            oqueue;                                         \
   /* Input circular buffer.*/                                               \
   uint8_t                   ib[SERIAL_BUFFERS_SIZE];                        \
