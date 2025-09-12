@@ -176,7 +176,8 @@ static float pid_controller_update(pid_controller_t* pid, float target, float in
     if (output < pid->output_min) output = pid->output_min;
 
 
-    if (output != pid->output_max && output != pid->output_min) {
+    if (output != pid->output_max && output != pid->output_min)
+    {
         pid->integral += new_integral;
     }
 
@@ -277,11 +278,20 @@ static void current_sensing_update(current_sensing_t* current_sensing, uint16_t 
     }
 }
 
-static void current_sensing_get_current_phases(current_sensing_t const * current_sensing, float* ia, float* ib, float* ic)
+static void current_sensing_get_current_phases(current_sensing_t const* current_sensing, float* ia, float* ib,
+                                               float* ic)
 {
-    *ia = current_sensing->current_phases[0] - 0.23f;
-    *ib = current_sensing->current_phases[1] + 0.23f;
-    *ic = current_sensing->current_phases[2] + 0.06f;
+    *ia = (current_sensing->current_phases[0] - 0.23f) * (current_sensing->current_direction[0] == 0 ? 1 : -1);
+    *ib = (current_sensing->current_phases[1] + 0.23f) * (current_sensing->current_direction[1] == 0 ? 1 : -1);
+    *ic = (current_sensing->current_phases[2] + 0.06f) * (current_sensing->current_direction[2] == 0 ? 1 : -1);
+}
+
+static void current_sensing_set_direction(current_sensing_t* current_sensing, uint8_t phase, uint8_t direction)
+{
+    if (phase < CURRENT_SENSING_NUM_PHASES)
+    {
+        current_sensing->current_direction[phase] = direction;
+    }
 }
 
 /*===========================================================================*/
@@ -295,16 +305,34 @@ static foc_set_phase_voltages_func_t foc_set_phase_voltages_func;
 static void foc_init(const uint16_t switching_frequency, uint16_t battery_voltage,
                      foc_set_phase_voltages_func_t set_phase_voltages_func)
 {
-    pid_controller_init(&foc_pid_q_controller, 8.0f, 0.0f, 0.0f, 1.0 / switching_frequency, -(battery_voltage / 2.0f)   ,
+    pid_controller_init(&foc_pid_q_controller, 8.0f, 0.0f, 0.0f, 1.0 / switching_frequency, -(battery_voltage / 2.0f),
                         battery_voltage / 2.0f, 1);
     pid_controller_init(&foc_pid_d_controller, 0.5f, 0.0f, 0.0f, 1.0 / switching_frequency, -battery_voltage / 2.0f,
                         battery_voltage / 2.0f, 1);
     foc_set_phase_voltages_func = set_phase_voltages_func;
 }
 
+static void clarke_park_transform(float ia, float ib, float ic, float cos_theta_rad, float sin_theta_rad, float* d, float* q)
+{
 
-void foc_update(float electrical_angle_degrees, float electrical_rpm, float q_ref_amperes, float ia_current,
-                float ib_current, float ic_current)
+    const float mid = (1.0f / 3.0f) * (ia + ib + ic);
+    // === SECTION 1: Clarke Transform ===
+    const float alpha = ia - mid;
+    const float beta = (ia - mid) * SQRT3 + (ib - mid) * TWO_SQRT3;
+
+    // === SECTION 2: Park Transform ===;
+    const float temp_d = alpha * cos_theta_rad + beta * sin_theta_rad;
+    const float temp_q = -alpha * sin_theta_rad + beta * cos_theta_rad;
+
+    *d = temp_d;
+    *q = temp_q;
+
+    motor_get_motor()->motor_state.q = temp_q;
+    motor_get_motor()->motor_state.d = temp_d;
+    motor_get_motor()->motor_state.current_mag = sqrtf(temp_d * temp_d + temp_q * temp_q);
+}
+
+void foc_update(float cos_theta_rad, float sin_theta_rad, float d, float q, float q_ref_amperes)
 {
     // Check if function pointer is set
     if (foc_set_phase_voltages_func == NULL)
@@ -312,32 +340,6 @@ void foc_update(float electrical_angle_degrees, float electrical_rpm, float q_re
         return; // Hardware function not initialized
     }
 
-    (void)electrical_rpm;
-    electrical_angle_degrees = NORM_ANGLE_180(electrical_angle_degrees);
-    float electrical_angle_rad = DEG_TO_RAD(electrical_angle_degrees);
-    // float electrical_rpm_rad_s = RPM_TO_RAD_S(electrical_rpm);  // Unused variable
-
-    // Current values are now passed directly from the current sensor module
-    float ia_f = ia_current;
-    float ib_f = ib_current;
-    float ic_f = ic_current;
-
-    const float mid = (1.0f / 3.0f) * (ia_f + ib_f + ic_f);
-    // === SECTION 1: Clarke Transform ===
-    const float alpha = ia_f;
-    const float beta = (ib_f - ic_f) / SQRT3;
-
-    // === SECTION 2: Park Transform ===
-    const float cos_theta_rad = cosf(electrical_angle_rad);
-    const float sin_theta_rad = sinf(electrical_angle_rad);
-    const float d = alpha * cos_theta_rad + beta * sin_theta_rad;
-    const float q = -alpha * sin_theta_rad + beta * cos_theta_rad;
-
-    motor_get_motor()->motor_state.q = q;
-    motor_get_motor()->motor_state.d = d;
-    motor_get_motor()->motor_state.current_mag = sqrtf(d * d + q * q);
-
-    // === SECTION 3: PID Controllers ===
     const float d_ref = 0;
     const float d_pid_output = pid_controller_update(&foc_pid_d_controller, d_ref, d);
     const float q_pid_output = pid_controller_update(&foc_pid_q_controller, q_ref_amperes, q);
@@ -575,7 +577,8 @@ static float position_tracker_update(position_tracker_t* position_tracker, float
     // Accumulate the corrected delta
     position_tracker->now_angle += delta_position;
     position_tracker->prev_position = now_position;
-    position_tracker->now_speed = 0.1f * delta_position / dt + 0.9f * position_tracker->now_speed; // Simple low-pass filter
+    position_tracker->now_speed = 0.1f * delta_position / dt + 0.9f * position_tracker->now_speed;
+    // Simple low-pass filter
     return position_tracker->now_angle;
 }
 
@@ -662,6 +665,40 @@ static pid_controller_t* position_controller_get_pid_controller(void)
     return &position_controller;
 }
 
+static open_loop_control_t open_loop_control;
+
+static void open_loop_control_init(open_loop_control_t* open_loop_control)
+{
+    open_loop_control->now_speed_deg_s = 0.0f;
+    open_loop_control->acceleration_deg_s2 = 0.0f;
+    open_loop_control->speed_deg_s = 0.0f;
+    open_loop_control->voltage_d = 0.0f;
+    open_loop_control->voltage_q = 0.0f;
+    open_loop_control->now_angle_deg = 0.0f;
+}
+
+static void open_loop_control_update(open_loop_control_t* open_loop_ctrl, float dt)
+{
+    // 更新速度
+    open_loop_ctrl->now_speed_deg_s += open_loop_ctrl->acceleration_deg_s2 * dt;
+    if (open_loop_ctrl->now_speed_deg_s > open_loop_ctrl->speed_deg_s)
+        open_loop_ctrl->now_speed_deg_s = open_loop_ctrl->speed_deg_s;
+    else if (open_loop_ctrl->now_speed_deg_s < -open_loop_ctrl->speed_deg_s)
+        open_loop_ctrl->now_speed_deg_s = -open_loop_ctrl->speed_deg_s;
+
+    // 累加角度
+    float open_loop_angle_deg = open_loop_ctrl->now_angle_deg;
+    open_loop_angle_deg += open_loop_ctrl->now_speed_deg_s * dt;
+    open_loop_ctrl->now_angle_deg = open_loop_angle_deg;
+
+    float angle_rad = DEG_TO_RAD(NORM_ANGLE_180(open_loop_angle_deg));
+    float cos_theta = cosf(angle_rad);
+    float sin_theta = sinf(angle_rad);
+
+    // 设置d轴、q轴电压
+    motor_set_phase_voltages(cos_theta, sin_theta, open_loop_ctrl->voltage_d, open_loop_ctrl->voltage_q);
+}
+
 /*===========================================================================*/
 /* ADC Interrupt Handler                                                     */
 /*===========================================================================*/
@@ -699,7 +736,13 @@ CH_FAST_IRQ_HANDLER(STM32_ADC_HANDLER)
         float now_speed_electrical_rpm = DEG_S_TO_RPM(position_tracker_get_speed_deg_s(&position_tracker)) *
             motor_get_motor()->motor_config.num_poles_pairs;
         float electrical_angle_deg = NORM_ANGLE_180(
-            position_tracker_get_angle_deg(&position_tracker) * motor_get_motor()->motor_config.num_poles_pairs - ADS5600_ENCODER_OFFSET_DEGREE);
+            position_tracker_get_angle_deg(&position_tracker) * motor_get_motor()->motor_config.num_poles_pairs -
+            ADS5600_ENCODER_OFFSET_DEGREE);
+
+        float d, q;
+        const float sin_angle_rad = sinf(DEG_TO_RAD(electrical_angle_deg));
+        const float cos_angle_rad = cosf(DEG_TO_RAD(electrical_angle_deg));
+        clarke_park_transform(ia_current, ib_current, ic_current, cos_angle_rad, sin_angle_rad, &d, &q);
 
         switch (motor_get_motor()->motor_status)
         {
@@ -708,8 +751,28 @@ CH_FAST_IRQ_HANDLER(STM32_ADC_HANDLER)
         case MOTOR_STATUS_FULL_BRAKE:
             break;
         case MOTOR_STATUS_RUNNING:
-            foc_update(electrical_angle_deg, now_speed_electrical_rpm, motor_get_motor()->motor_state.q_target_amperes,
-                       ia_current, ib_current, ic_current);
+            switch (motor_get_motor()->motor_control_mode)
+            {
+            case MOTOR_CONTROL_MODE_DUTY:
+            case MOTOR_CONTROL_MODE_SPEED:
+            case MOTOR_CONTROL_MODE_CURRENT:
+            case MOTOR_CONTROL_MODE_CURRENT_BRAKE:
+            case MOTOR_CONTROL_MODE_POS:
+                foc_update(cos_angle_rad, sin_angle_rad, d, q, motor_get_motor()->motor_state.q_target_amperes);
+                break;
+            case MOTOR_CONTROL_MODE_HANDBRAKE:
+                break;
+            case MOTOR_CONTROL_MODE_OPENLOOP:
+                open_loop_control_update(&open_loop_control, 1.0f / PWM_FREQ);
+                break;
+            case MOTOR_CONTROL_MODE_OPENLOOP_PHASE:
+            case MOTOR_CONTROL_MODE_OPENLOOP_DUTY:
+            case MOTOR_CONTROL_MODE_OPENLOOP_DUTY_PHASE:
+                break;
+            default:
+                break;
+            }
+
             break;
         default:
             break;
@@ -833,6 +896,17 @@ static void mc_set_phase_voltage(float cos_theta_rad, float sin_theta_rad, float
     foc_set_phase_voltages_func(cos_theta_rad, sin_theta_rad, v_d, v_q);
 }
 
+static void mc_set_openloop(float speed_deg_s, float acceleration_deg_s2, float v_d, float v_q)
+{
+    motor_get_motor()->motor_control_mode = MOTOR_CONTROL_MODE_OPENLOOP;
+    motor_get_motor()->motor_status = MOTOR_STATUS_RUNNING;
+
+    open_loop_control.speed_deg_s = speed_deg_s;
+    open_loop_control.acceleration_deg_s2 = acceleration_deg_s2;
+    open_loop_control.voltage_d = v_d;
+    open_loop_control.voltage_q = v_q;
+}
+
 /*===========================================================================*/
 /* Shell Command Interface                                                   */
 /*===========================================================================*/
@@ -853,9 +927,9 @@ static void cmd_set_position(BaseSequentialStream* chp, int argc, char* argv[])
         chprintf(chp, "Usage: set_position <position_deg> <speed_deg_s> <current_amps>\r\n");
         return;
     }
-    float position = atof(argv[0]);
-    float speed = atof(argv[1]);
-    float current = atof(argv[2]);
+    float position = strtod(argv[0], NULL);
+    float speed = strtod(argv[1], NULL);
+    float current = strtod(argv[2], NULL);
     mc_set_position(position, speed, current);
 }
 
@@ -866,8 +940,8 @@ static void cmd_set_speed(BaseSequentialStream* chp, int argc, char* argv[])
         chprintf(chp, "Usage: set_speed <speed_deg_s> <current_amps>\r\n");
         return;
     }
-    float speed = atof(argv[0]);
-    float current = atof(argv[1]);
+    float speed = strtod(argv[0], NULL);
+    float current = strtod(argv[1], NULL);
     mc_set_speed(speed, current);
 }
 
@@ -878,7 +952,7 @@ static void cmd_set_current(BaseSequentialStream* chp, int argc, char* argv[])
         chprintf(chp, "Usage: set_current <current_amps>\r\n");
         return;
     }
-    float current = atof(argv[0]);
+    float current = strtod(argv[0], NULL);
     mc_set_current(current);
 }
 
@@ -894,6 +968,20 @@ static void cmd_set_release(BaseSequentialStream* chp, int argc, char* argv[])
     mc_set_release();
 }
 
+static void cmd_set_open_loop(BaseSequentialStream* chp, int argc, char* argv[])
+{
+    if (argc != 4)
+    {
+        chprintf(chp, "Usage: set_openloop <speed_deg_s> <acceleration_deg_s2> <v_d> <v_q>\r\n");
+        return;
+    }
+    float speed = strtod(argv[0], NULL);
+    float acceleration = strtod(argv[1], NULL);
+    float v_d = strtod(argv[2], NULL);
+    float v_q = strtod(argv[3], NULL);
+    mc_set_openloop(speed, acceleration, v_d, v_q);
+}
+
 static void cmd_motor_status(BaseSequentialStream* chp, int argc, char* argv[])
 {
     (void)argc;
@@ -906,6 +994,8 @@ static void cmd_motor_status(BaseSequentialStream* chp, int argc, char* argv[])
     chprintf(chp, "Motor target d current: %.2f A\r\n", motor_get_motor()->motor_state.d_target_amperes);
     chprintf(chp, "Motor target q voltage: %.2f V\r\n", motor_get_motor()->motor_state.q_voltage);
     chprintf(chp, "Motor target d voltage: %.2f V\r\n", motor_get_motor()->motor_state.d_voltage);
+    chprintf(chp, "Motor target q : %.2f V\r\n", motor_get_motor()->motor_state.q);
+    chprintf(chp, "Motor target d : %.2f V\r\n", motor_get_motor()->motor_state.d);
     chprintf(chp, "Motor voltage mag: %.2f V\r\n", motor_get_motor()->motor_state.voltage_mag);
     chprintf(chp, "Motor current mag: %.2f A\r\n", motor_get_motor()->motor_state.current_mag);
     chprintf(chp, "Motor duty: %.2f\r\n", motor_get_motor()->motor_state.duty);
@@ -936,6 +1026,19 @@ static void cmd_motor_set_zero_angle_voltage(BaseSequentialStream* chp, int argc
     mc_set_phase_voltage(1, 0, 0, voltage);
 }
 
+static void cmd_set_current_direction(BaseSequentialStream* chp, int argc, char* argv[])
+{
+    if (argc != 2)
+    {
+        chprintf(chp, "Usage: set_current_direction <phase> <current_amps>\r\n");
+        return;
+    }
+    uint8_t phase = strtol(argv[0], NULL, 0);
+    uint8_t direction = strtol(argv[1], NULL, 0);
+
+    current_sensing_set_direction(&current_sensing, phase, direction);
+}
+
 static const ShellCommand shell_commands[] = {
     {"set-position", cmd_set_position},
     {"set-speed", cmd_set_speed},
@@ -943,6 +1046,8 @@ static const ShellCommand shell_commands[] = {
     {"set-release", cmd_set_release},
     {"motor-status", cmd_motor_status},
     {"motor-set-zero-angle-voltage", cmd_motor_set_zero_angle_voltage},
+    {"set-open-loop", cmd_set_open_loop},
+    {"set-c-dir", cmd_set_current_direction},
     {NULL, NULL},
 };
 
@@ -1173,6 +1278,7 @@ int main(void)
     palSetLineMode(LINE_DRV_M_PWM, PAL_MODE_OUTPUT_PUSHPULL);
 
     mb_slave_app_init(MODBUS_SLAVE_ID, &SD1, 115200);
+    open_loop_control_init(&open_loop_control);
 
     position_tracker_init(&position_tracker);
     current_sensing_init(&current_sensing,

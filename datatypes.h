@@ -88,4 +88,14 @@ typedef enum {
   MODBUS_INPUT_REGISTER_VOLTAGE_ANGLE,
 } modbus_input_register_t;
 
+typedef struct
+{
+  float voltage_d;
+  float voltage_q;
+  float speed_deg_s;
+  float acceleration_deg_s2;
+  float now_speed_deg_s;
+  float now_angle_deg;
+} open_loop_control_t;
+
 #endif
