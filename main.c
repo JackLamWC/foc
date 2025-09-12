@@ -295,7 +295,7 @@ static foc_set_phase_voltages_func_t foc_set_phase_voltages_func;
 static void foc_init(const uint16_t switching_frequency, uint16_t battery_voltage,
                      foc_set_phase_voltages_func_t set_phase_voltages_func)
 {
-    pid_controller_init(&foc_pid_q_controller, 2.0f, 0.0f, 0.0f, 1.0 / switching_frequency, -(battery_voltage / 2.0f)   ,
+    pid_controller_init(&foc_pid_q_controller, 8.0f, 0.0f, 0.0f, 1.0 / switching_frequency, -(battery_voltage / 2.0f)   ,
                         battery_voltage / 2.0f, 1);
     pid_controller_init(&foc_pid_d_controller, 0.5f, 0.0f, 0.0f, 1.0 / switching_frequency, -battery_voltage / 2.0f,
                         battery_voltage / 2.0f, 1);
@@ -318,15 +318,14 @@ void foc_update(float electrical_angle_degrees, float electrical_rpm, float q_re
     // float electrical_rpm_rad_s = RPM_TO_RAD_S(electrical_rpm);  // Unused variable
 
     // Current values are now passed directly from the current sensor module
-    float ia_f = -1 * ia_current;
-    float ib_f = -1 * ib_current;
-    float ic_f = -1 * ic_current;
+    float ia_f = ia_current;
+    float ib_f = ib_current;
+    float ic_f = ic_current;
 
     const float mid = (1.0f / 3.0f) * (ia_f + ib_f + ic_f);
     // === SECTION 1: Clarke Transform ===
-    const float alpha = ia_f - mid;
-    float beta = ib_f - mid;  
-    beta = ONE_SQRT3 * alpha + TWO_SQRT3 * beta;
+    const float alpha = ia_f;
+    const float beta = (ib_f - ic_f) / SQRT3;
 
     // === SECTION 2: Park Transform ===
     const float cos_theta_rad = cosf(electrical_angle_rad);
@@ -443,15 +442,15 @@ static void pwm_init(void)
 // duty is 0-1
 static void pwm_set_duty(float duty_a, float duty_b, float duty_c)
 {
-    const uint16_t arr = TIM1->ARR;
+    uint16_t arr = TIM1->ARR;
 
-    motor_get_motor()->motor_state.phase_duty[0] = duty_a * arr;
-    motor_get_motor()->motor_state.phase_duty[1] = duty_b * arr;
-    motor_get_motor()->motor_state.phase_duty[2] = duty_c * arr;
+    motor_get_motor()->motor_state.phase_duty[0] = duty_a * arr * 0.8f;
+    motor_get_motor()->motor_state.phase_duty[1] = duty_b * arr * 0.8f;
+    motor_get_motor()->motor_state.phase_duty[2] = duty_c * arr * 0.8f;
 
-    TIM1->CCR1 = duty_a * arr;
-    TIM1->CCR2 = duty_b * arr;
-    TIM1->CCR3 = duty_c * arr;
+    TIM1->CCR1 = duty_a * arr * 0.8f;
+    TIM1->CCR2 = duty_b * arr * 0.8f;
+    TIM1->CCR3 = duty_c * arr * 0.8f;
 }
 
 /*===========================================================================*/
@@ -532,7 +531,7 @@ static void adc_init(void)
 
 #define ADS5600_COUNT_PER_REVOLUTION 4096
 #define ADS5600_COUNT_TO_DEG(count) (count * 0.087890625f) // 360 / 4096
-#define ADS5600_ENCODER_OFFSET_DEGREE 0.0f
+#define ADS5600_ENCODER_OFFSET_DEGREE 10.0f
 
 
 /*===========================================================================*/
